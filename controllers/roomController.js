@@ -1,3 +1,5 @@
+//roomController.js
+
 const roomModel = require('../models/room');
 
 // Crear una nueva sala
