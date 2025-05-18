@@ -1,30 +1,44 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
-const bcrypt  = require('bcrypt');
-const jwt     = require('jsonwebtoken');
-const mysql   = require('mysql2');
-
-
-
-
-
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const mysql = require('mysql2');
+const cors = require('cors');
+const authMiddleware = require('./middleware/authMiddleware');
 
 const app = express();
 app.use(express.json());
 
-// ————— Conexión a MySQL —————
+// ——— Conexión a MySQL ———
 const db = mysql.createPool({
-  host:     process.env.DB_HOST,
-  user:     process.env.DB_USER,
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
 
+// ——— Crear tabla reservations si no existe ———
+db.execute(`
+  CREATE TABLE IF NOT EXISTS reservations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT,
+    room_id INT,
+    reservation_date DATE,
+    time TIME,
+    seat_row INT,
+    seat_column INT,
+    status VARCHAR(20),
+    created_at DATETIME
+  )
+`, (err) => {
+  if (err) {
+    console.error('❌ Error al crear tabla reservations:', err);
+  } else {
+    console.log('✅ Tabla reservations lista.');
+  }
+});
 
-
-const cors = require('cors');
-
+// ——— CORS ———
 app.use(cors({
   origin: 'http://localhost:5173',
   credentials: true,
@@ -32,181 +46,75 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-
-
-// ————— Middleware de Autenticación —————
-const SECRET = process.env.JWT_SECRET;
-function auth(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header) return res.status(403).json({ error: 'No token provided' });
-  const token = header.split(' ')[1];
-  try {
-    req.user = jwt.verify(token, SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: 'Token inválido' });
-  }
-}
-
-// ————— 1) Registro — POST /api/auth/register —————
+// ——— AUTH ———
 app.post('/api/auth/register', (req, res) => {
   const { user_name, email, pwd } = req.body;
-  if (!user_name || !email || !pwd) 
+  if (!user_name || !email || !pwd)
     return res.status(400).json({ error: 'Faltan datos' });
 
   const hash = bcrypt.hashSync(pwd, 10);
-  const sql  = 'INSERT INTO users (user_name,email,pwd) VALUES (?,?,?)';
-  db.execute(sql, [user_name, email, hash], (err, result) => {
+  db.execute('INSERT INTO users (user_name, email, pwd) VALUES (?, ?, ?)', [user_name, email, hash], (err, result) => {
     if (err) return res.status(500).json({ error: err.message });
     res.status(201).json({ message: 'Registrado', userId: result.insertId });
   });
 });
 
-// ————— 2) Login — POST /api/auth/login —————
 app.post('/api/auth/login', (req, res) => {
   const { email, pwd } = req.body;
-  if (!email || !pwd) 
+  if (!email || !pwd)
     return res.status(400).json({ error: 'Faltan datos' });
 
-  const sql = 'SELECT * FROM users WHERE email = ?';
-  db.execute(sql, [email], (err, rows) => {
+  db.execute('SELECT * FROM users WHERE email = ?', [email], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
+
     const user = rows[0];
     if (!user || !bcrypt.compareSync(pwd, user.pwd))
       return res.status(401).json({ error: 'Credenciales inválidas' });
 
-    const token = jwt.sign({ id: user.id, role: user.role }, SECRET, { expiresIn: '2h' });
-    res.json({ message: 'Login exitoso', token });
+    const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '2h' });
+    res.json({
+      message: 'Login exitoso',
+      token,
+      user: {
+        id: user.id,
+        user_name: user.user_name,
+        email: user.email,
+        role: user.role
+      }
+    });
   });
 });
 
-// ————— 3) Salas de cine — GET/POST /api/rooms —————
-app.get('/api/rooms', auth, (req, res) => {
+// ——— Rooms ———
+app.get('/api/rooms', authMiddleware, (req, res) => {
   db.execute('SELECT * FROM cinema', (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
 });
-app.post('/api/rooms', auth, (req, res) => {
+
+app.post('/api/rooms', authMiddleware, (req, res) => {
   const { name, rows_num, columns_num, movie, img } = req.body;
-  if (!name||!rows_num||!columns_num||!movie||!img)
+  if (!name || !rows_num || !columns_num || !movie || !img)
     return res.status(400).json({ error: 'Faltan datos de sala' });
 
-  const sql = 'INSERT INTO cinema (name,rows_num,columns_num,movie,img) VALUES (?,?,?,?,?)';
-  db.execute(sql, [name,rows_num,columns_num,movie,img], (err, result) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.status(201).json({ message: 'Sala creada', cinemaId: result.insertId });
-  });
-});
-
-// ————— 4) Usuarios — GET /api/users —————
-app.get('/api/users', auth, (req, res) => {
-  db.execute('SELECT id,user_name,email,role,status FROM users', (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
-
-// ————— 5) Reservaciones — GET/POST /api/reservations —————
-app.post('/api/reservations', auth, (req, res) => {
-  const { id_user, id_schedule, seats } = req.body;
-
-  if (!id_user || !id_schedule || !seats || seats.length === 0) {
-    return res.status(400).json({ error: 'Faltan datos' });
-  }
-
-
-
-
-  // Verificar existencia del usuario
-  db.execute('SELECT id FROM users WHERE id = ?', [id_user], (err, userResults) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (userResults.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
-
-    // Verificar existencia del horario
-    db.execute('SELECT id FROM schedule WHERE id = ?', [id_schedule], (err, scheduleResults) => {
+  db.execute('INSERT INTO cinema (name, rows_num, columns_num, movie, img) VALUES (?, ?, ?, ?, ?)',
+    [name, rows_num, columns_num, movie, img],
+    (err, result) => {
       if (err) return res.status(500).json({ error: err.message });
-      if (scheduleResults.length === 0) return res.status(404).json({ error: 'Horario no encontrado' });
-
-      // Verificar disponibilidad de los asientos
-      const seatPlaceholders = seats.map(() => '?').join(',');
-      const checkSeatsQuery = `
-        SELECT * FROM seats 
-        WHERE id_schedule = ? 
-        AND full_name IN (${seatPlaceholders}) 
-        AND status = 'available'
-      `;
-
-      db.execute(checkSeatsQuery, [id_schedule, ...seats], (err, seatResults) => {
-        if (err) return res.status(500).json({ error: err.message });
-
-        if (seatResults.length !== seats.length) {
-          return res.status(400).json({ error: 'Algunos asientos ya están reservados' });
-        }
-
-        const updateSeatsQuery = `
-          UPDATE seats 
-          SET status = 'reserved', id_user = ? 
-          WHERE id_schedule = ? 
-          AND full_name IN (${seatPlaceholders})
-        `;
-
-        db.execute(updateSeatsQuery, [id_user, id_schedule, ...seats], (err) => {
-          if (err) return res.status(500).json({ error: err.message });
-
-          res.status(201).json({ message: 'Reservación creada exitosamente' });
-        });
-      });
+      res.status(201).json({ message: 'Sala creada', cinemaId: result.insertId });
     });
-  });
 });
 
-// ————— Ruta de prueba protegida — GET /api/protegida —————
-app.get('/api/protegida', auth, (req, res) => {
-  res.json({ message: 'Ruta protegida OK', user: req.user });
-});
-
-// ————— Crear nuevo horario —————
-app.post('/api/schedules', auth, (req, res) => {
-  const { id_cinema, date, time } = req.body;
-
-  if (!id_cinema || !date || !time) {
-    return res.status(400).json({ error: 'Faltan datos del horario' });
-  }
-
-  db.execute('SELECT id FROM cinema WHERE id = ?', [id_cinema], (err, result) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (result.length === 0) return res.status(404).json({ error: 'Cine no encontrado' });
-
-    const sql = 'INSERT INTO schedule (id_cinema, date, time) VALUES (?, ?, ?)';
-    db.execute(sql, [id_cinema, date, time], (err, result) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ message: 'Horario creado', scheduleId: result.insertId });
-    });
-  });
-});
-
-// ————— Obtener todos los horarios — GET /api/schedules —————
-app.get('/api/schedules', auth, (req, res) => {
+// ——— Schedules ———
+app.get('/api/schedules', authMiddleware, (req, res) => {
   db.execute('SELECT * FROM schedule', (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
 });
 
-// ————— Obtener asientos por horario —————
-app.get('/api/seats/:scheduleId', auth, (req, res) => {
-  const scheduleId = req.params.scheduleId;
-
-  db.execute('SELECT * FROM seats WHERE id_schedule = ?', [scheduleId], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
-
-
-// Obtener un solo horario por su ID
-app.get('/api/schedules/:id', auth, (req, res) => {
+app.get('/api/schedules/:id', authMiddleware, (req, res) => {
   const scheduleId = req.params.id;
   db.execute('SELECT * FROM schedule WHERE id = ?', [scheduleId], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -215,11 +123,73 @@ app.get('/api/schedules/:id', auth, (req, res) => {
   });
 });
 
+app.post('/api/schedules', authMiddleware, (req, res) => {
+  const { id_cinema, date, time } = req.body;
+  if (!id_cinema || !date || !time)
+    return res.status(400).json({ error: 'Faltan datos del horario' });
 
+  db.execute('SELECT id FROM cinema WHERE id = ?', [id_cinema], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (result.length === 0) return res.status(404).json({ error: 'Cine no encontrado' });
 
+    db.execute('INSERT INTO schedule (id_cinema, date, time) VALUES (?, ?, ?)',
+      [id_cinema, date, time],
+      (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.status(201).json({ message: 'Horario creado', scheduleId: result.insertId });
+      });
+  });
+});
 
-// ————— Arrancar Servidor —————
+// ——— Seats by Schedule ———
+app.get('/api/seats/:scheduleId', authMiddleware, (req, res) => {
+  const scheduleId = req.params.scheduleId;
+
+  db.execute('SELECT * FROM schedule WHERE id = ?', [scheduleId], (err, scheduleResult) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (scheduleResult.length === 0) return res.status(404).json({ error: 'Horario no encontrado' });
+
+    const { id_cinema, date, time } = scheduleResult[0];
+
+    db.execute('SELECT * FROM cinema WHERE id = ?', [id_cinema], (err, cinemaResult) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (cinemaResult.length === 0) return res.status(404).json({ error: 'Sala no encontrada' });
+
+      const room = cinemaResult[0];
+      const totalSeats = [];
+
+      for (let row = 0; row < room.rows_num; row++) {
+        for (let col = 0; col < room.columns_num; col++) {
+          const full_name = `${String.fromCharCode(65 + row)}${col + 1}`;
+          totalSeats.push({ seat_row: row, seat_column: col, full_name, status: 'available' });
+        }
+      }
+
+      db.execute(
+        'SELECT seat_row, seat_column FROM reservations WHERE room_id = ? AND reservation_date = ? AND time = ?',
+        [id_cinema, date, time],
+        (err, reservedResult) => {
+          if (err) return res.status(500).json({ error: err.message });
+
+          reservedResult.forEach(seat => {
+            const full_name = `${String.fromCharCode(65 + seat.seat_row)}${seat.seat_column + 1}`;
+            const s = totalSeats.find(x => x.full_name === full_name);
+            if (s) s.status = 'reserved';
+          });
+
+          res.json(totalSeats);
+        }
+      );
+    });
+  });
+});
+
+// ——— Reservas (archivo externo protegido) ———
+const reservationRoutes = require('./routes/reservationRoutes');
+app.use('/api/reservations', authMiddleware, reservationRoutes);
+
+// ——— Iniciar servidor ———
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
 });

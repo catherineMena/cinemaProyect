@@ -1,3 +1,4 @@
+//reservation.js
 const db = require('../db');
 
 // Verificar disponibilidad de asiento
