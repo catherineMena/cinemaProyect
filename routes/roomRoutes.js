@@ -1,22 +1,18 @@
-//roomRoutes.js
-
 const express = require('express');
 const router = express.Router();
 const roomController = require('../controllers/roomController');
 
-// Ruta para crear una nueva sala
-router.post('/', roomController.createRoom);
-
-// Ruta para obtener todas las salas
+// Rutas para salas
 router.get('/', roomController.getAllRooms);
-
-// Ruta para obtener una sala por ID
+router.post('/', roomController.createRoom);
 router.get('/:id', roomController.getRoomById);
-
-// Ruta para actualizar una sala
 router.put('/:id', roomController.updateRoom);
-
-// Ruta para eliminar una sala
 router.delete('/:id', roomController.deleteRoom);
+
+// Ruta para obtener los asientos de la sala
+router.get('/:id/seats', roomController.getSeats);
+
+// Ruta para reservar un asiento
+router.put('/:roomId/seats/:seatId/reserve', roomController.reserveSeat);
 
 module.exports = router;
